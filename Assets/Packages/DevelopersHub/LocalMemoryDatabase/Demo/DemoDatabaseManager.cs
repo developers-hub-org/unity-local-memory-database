@@ -186,6 +186,7 @@ public class DemoDatabaseManager : MonoBehaviour
                     updated += await Database.UpdateAsync<DemoAccountsTable>(_tableName, x => x.id == id, account =>
                     {
                         account.level += 1;
+                        return account;
                     });
                 }
                 stopwatch.Stop();

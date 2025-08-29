@@ -447,7 +447,7 @@ namespace DevelopersHub.LocalMemoryDatabase
             return Insert(record, generatePrimaryKeyIfMissing);
         }
 
-        public int Update(Func<T, bool> predicate, Action<T> updateAction)
+        public int Update(Func<T, bool> predicate, Func<T, T> action)
         {
             if (!_loaded)
             {
@@ -466,7 +466,7 @@ namespace DevelopersHub.LocalMemoryDatabase
                         T record = _dataList[i];
 
                         // Apply the update action
-                        updateAction(record);
+                        record = action(record);
 
                         // Validate primary key uniqueness if exists
                         if (_primaryKeyField != null)
@@ -481,7 +481,7 @@ namespace DevelopersHub.LocalMemoryDatabase
                                 continue;
                             }
                         }
-
+                        //Debug.Log($"Updating record at index {i} in table {Name}");
                         UpdateRecord(i, record);
                         updatedCount++;
                     }
@@ -491,7 +491,7 @@ namespace DevelopersHub.LocalMemoryDatabase
             return updatedCount;
         }
 
-        public async Task<int> UpdateAsync(Func<T, bool> predicate, Action<T> updateAction)
+        public async Task<int> UpdateAsync(Func<T, bool> predicate, Func<T, T> action)
         {
             // Wait for loading to complete
             int timeout = 10000; // 10 seconds
@@ -501,7 +501,7 @@ namespace DevelopersHub.LocalMemoryDatabase
                 await Task.Delay(10);
                 elapsed += 10;
             }
-            return Update(predicate, updateAction);
+            return Update(predicate, action);
         }
 
         public int Delete(Func<T, bool> predicate)
@@ -864,7 +864,7 @@ namespace DevelopersHub.LocalMemoryDatabase
                         _dataList = new List<T>();
                         BuildIndexes();
                         _loaded = true;
-                        Debug.Log($"Table '{Name}' created with empty data (file not found)");
+                        // Debug.Log($"Table '{Name}' file created with empty data.");
                     }
                     return;
                 }
@@ -986,6 +986,151 @@ namespace DevelopersHub.LocalMemoryDatabase
                         _dataList = new List<T>();
                         _primaryKeyIndex?.Clear();
                         _indexes?.Clear();
+                    }
+                }
+            }
+        }
+
+        public void LoadData()
+        {
+            // Early return if already loaded
+            if (_loaded) { return; }
+
+            lock (_loadingLock)
+            {
+                if (_loaded) { return; }
+                if (_loading)
+                {
+                    // Wait for ongoing loading to complete
+                    while (_loading)
+                    {
+                        System.Threading.Thread.Sleep(10);
+                    }
+                    if (_loaded) return;
+                }
+
+                _loading = true;
+                _loaded = false;
+
+                try
+                {
+                    string filePath = Database.GetFilePath(Name);
+
+                    // Handle non-existent file case
+                    if (!File.Exists(filePath))
+                    {
+                        lock (_dataLock)
+                        {
+                            _dataList = new List<T>();
+                            BuildIndexes();
+                            _loaded = true;
+                            Debug.Log($"Table '{Name}' file created with empty data.");
+                        }
+                        return;
+                    }
+
+                    // Synchronous file loading with retry logic
+                    const int maxRetries = 3;
+                    int retryCount = 0;
+                    bool success = false;
+
+                    while (!success && retryCount < maxRetries)
+                    {
+                        try
+                        {
+                            using (FileStream fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            using (BufferedStream bufferedStream = new BufferedStream(fileStream, 81920))
+                            using (BinaryReader reader = new BinaryReader(bufferedStream))
+                            {
+                                // Read and validate file header
+                                if (reader.BaseStream.Length < sizeof(int))
+                                {
+                                    throw new InvalidDataException($"Table file {Name} is corrupted (too short)");
+                                }
+
+                                // Read item count
+                                int itemCount = reader.ReadInt32();
+
+                                // Validate reasonable size
+                                const int maxReasonableSize = 1000000;
+                                if (itemCount < 0 || itemCount > maxReasonableSize)
+                                {
+                                    throw new InvalidDataException($"Invalid item count {itemCount} in table {Name}");
+                                }
+
+                                List<T> newDataList = new List<T>(itemCount);
+                                var fields = typeof(T).GetFields(BindingFlags.Public | BindingFlags.Instance);
+
+                                // Pre-calculate field readers for faster access
+                                var fieldProcessors = fields.Select(f => new
+                                {
+                                    Field = f,
+                                    Reader = GetFieldReader(f.FieldType)
+                                }).ToArray();
+
+                                for (int i = 0; i < itemCount; i++)
+                                {
+                                    try
+                                    {
+                                        T item = default;
+
+                                        foreach (var processor in fieldProcessors)
+                                        {
+                                            object value = processor.Reader(reader);
+                                            processor.Field.SetValueDirect(__makeref(item), value);
+                                        }
+
+                                        newDataList.Add(item);
+                                    }
+                                    catch (Exception recordEx)
+                                    {
+                                        Debug.LogWarning($"Error reading record {i} in table {Name}: {recordEx.Message}");
+                                        newDataList.Add(default);
+                                    }
+                                }
+
+                                // Atomic update of data and indexes
+                                lock (_dataLock)
+                                {
+                                    _dataList = newDataList;
+                                    BuildIndexes();
+                                    _loaded = true;
+                                    success = true;
+                                }
+
+                                //Debug.Log($"Table '{Name}' loaded synchronously with {itemCount} records");
+                            }
+                        }
+                        catch (IOException ioEx) when (retryCount < maxRetries - 1)
+                        {
+                            retryCount++;
+                            Debug.LogWarning($"Retry {retryCount} for table {Name} due to IO error: {ioEx.Message}");
+                            System.Threading.Thread.Sleep(100 * retryCount);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"Failed to load table {Name}: {ex.Message}");
+                            retryCount++;
+                            if (retryCount >= maxRetries)
+                            {
+                                throw new InvalidOperationException($"Failed to load table {Name} after {maxRetries} attempts", ex);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    _loading = false;
+
+                    // If loading failed completely, ensure we're in a clean state
+                    if (!_loaded)
+                    {
+                        lock (_dataLock)
+                        {
+                            _dataList = new List<T>();
+                            _primaryKeyIndex?.Clear();
+                            _indexes?.Clear();
+                        }
                     }
                 }
             }

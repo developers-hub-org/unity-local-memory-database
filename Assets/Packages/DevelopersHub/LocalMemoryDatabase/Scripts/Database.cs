@@ -55,8 +55,7 @@ namespace DevelopersHub.LocalMemoryDatabase
             Table<T> table = new Table<T>(tableName);
             if (!table.IsLoaded)
             {
-                // Load synchronously for this method since it's expected to be immediate
-                table.LoadDataAsync().Wait();
+                table.LoadData();
             }
             _instance._tables[tableName] = table;
             return table;
@@ -107,16 +106,16 @@ namespace DevelopersHub.LocalMemoryDatabase
             return await Task.Run(() => table.InsertAsync(record, generatePrimaryKeyIfMissing));
         }
 
-        public static int Update<T>(string tableName, Func<T, bool> predicate, Action<T> updateAction) where T : struct
+        public static int Update<T>(string tableName, Func<T, bool> predicate, Func<T, T> action) where T : struct
         {
             Table<T> table = GetTable<T>(tableName);
-            return table.Update(predicate, updateAction);
+            return table.Update(predicate, action);
         }
 
-        public static async Task<int> UpdateAsync<T>(string tableName, Func<T, bool> predicate, Action<T> updateAction) where T : struct
+        public static async Task<int> UpdateAsync<T>(string tableName, Func<T, bool> predicate, Func<T, T> action) where T : struct
         {
             Table<T> table = await GetTableAsync<T>(tableName);
-            return await Task.Run(() => table.UpdateAsync(predicate, updateAction));
+            return await Task.Run(() => table.UpdateAsync(predicate, action));
         }
 
         public static int Delete<T>(string tableName, Func<T, bool> predicate) where T : struct
